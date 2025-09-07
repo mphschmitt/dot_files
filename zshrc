@@ -106,3 +106,89 @@ alias py="/usr/bin/python3"
 export LANG=en
 
 PATH="$HOME/.local/bin:$HOME/bin:$PATH"
+
+# ======= ClamAV: invite hebdomadaire au démarrage d'un terminal =======
+# Ne rien faire pour les shells non interactifs
+[[ $- != *i* ]] && return
+
+# Paramètres (modifiables)
+: "${CLAM_PROMPT_PERIOD_DAYS:=7}"                              # Fréquence d'invite en jours
+: "${CLAM_SCAN_TARGETS:=$HOME}"                                 # Cibles de scan (séparées par des espaces)
+: "${XDG_STATE_HOME:=$HOME/.local/state}"
+: "${XDG_DATA_HOME:=$HOME/.local/share}"
+
+# Dossiers applicatifs
+_CLAM_STATE_DIR="$XDG_STATE_HOME/clamav-weekly"
+_CLAM_DATA_DIR="$XDG_DATA_HOME/clamav"
+_CLAM_LOG_DIR="$_CLAM_DATA_DIR/logs"
+_CLAM_QUAR_DIR="$_CLAM_DATA_DIR/quarantine"
+_CLAM_STAMP_FILE="$_CLAM_STATE_DIR/last_prompt"
+
+# Création des dossiers si besoin
+mkdir -p "$_CLAM_STATE_DIR" "$_CLAM_LOG_DIR" "$_CLAM_QUAR_DIR"
+
+# Commande de scan (clamscan par défaut; utilisez clamdscan si le démon est actif)
+function _clam_scan_cmd()
+{
+	if command -v clamdscan >/dev/null 2>&1 && systemctl is-active --quiet clamav-daemon 2>/dev/null; then
+		echo "clamdscan"
+		else
+		echo "clamscan"
+	fi
+}
+
+# Fonction d’invite hebdomadaire
+function _clam_weekly_prompt ()
+{
+	# Respect d’un opt-out explicite
+	[[ -n "$CLAM_DISABLE_WEEKLY_PROMPT" ]] && return
+
+	local now last=0 period_secs log_file scan_cmd
+	now=$(date +%s)
+	[[ -f "$_CLAM_STAMP_FILE" ]] && read -r last <"$_CLAM_STAMP_FILE" || true
+	period_secs=$(( CLAM_PROMPT_PERIOD_DAYS * 24 * 3600 ))
+
+	# Si la dernière invite est récente, quitter
+	(( now - last < period_secs )) && return
+
+	# Demande à l'utilisateur
+	printf "[ClamAV] Lancer un scan de %s ? [O/n] " "$CLAM_SCAN_TARGETS"
+	read -r ans
+	case "${(L)ans}" in n|no|non)  printf "%s" "$now" > "$_CLAM_STAMP_FILE"; return ;;
+	esac
+
+	scan_cmd=$(_clam_scan_cmd)
+	log_file="$_CLAM_LOG_DIR/scan-$(date +%Y%m%d-%H%M%S).log"
+
+	echo "[ClamAV] Début du scan avec $scan_cmd… Journal: $log_file"
+	# Options raisonnables par défaut :
+	# -r            : récursif
+	# --move        : met en quarantaine les fichiers infectés
+	# --log         : journal complet
+	# --cross-fs=no : évite de traverser les montages (utile si $HOME contient des montages)
+	# --infected    : affiche en sortie console uniquement les fichiers infectés
+	if [ "$scan_cmd" = "clamscan" ]; then
+		clamscan -r --cross-fs=no --infected --move="$_CLAM_QUAR_DIR" --log="$log_file" $CLAM_SCAN_TARGETS
+	else
+		clamdscan --multiscan --fdpass --move="$_CLAM_QUAR_DIR" --log="$log_file" $CLAM_SCAN_TARGETS
+	fi
+
+	# Marquer la date d’invite, succès ou non du scan
+	printf "%s" "$now" > "$_CLAM_STAMP_FILE"
+
+	# Récapitulatif minimal (extrait de fin de journal)
+	echo "[ClamAV] Récapitulatif :"
+	grep -E "Infected files:|Known viruses:|Scanned files:" "$log_file" || tail -n 20 "$log_file" || true
+}
+
+# Raccourci manuel pour lancer un scan à la demande : `clam-weekly-scan`
+function clam-weekly-scan ()
+{
+	# Réinitialise la date de dernière invite pour forcer la question et exécuter le scan
+	rm -f "$_CLAM_STAMP_FILE"
+	_clam_weekly_prompt
+}
+
+# Lancer l’invite à l’ouverture d’un terminal
+_clam_weekly_prompt
+# ======= Fin ClamAV hebdomadaire =======
